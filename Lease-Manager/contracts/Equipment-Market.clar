@@ -14,6 +14,7 @@
 (define-constant ERR-PAYMENT-OVERDUE (err u108))
 (define-constant ERR-EQUIPMENT-NOT-AVAILABLE (err u109))
 (define-constant ERR-INVALID-EQUIPMENT-STATE (err u110))
+(define-constant ERR-INVALID-INPUT (err u111))
 
 ;; Data Variables
 (define-data-var next-equipment-id uint u1)
@@ -230,6 +231,30 @@
   )
 )
 
+;; Input validation functions
+(define-private (validate-string-input (input (string-ascii 500)))
+  (and (> (len input) u0) (<= (len input) u500))
+)
+
+(define-private (validate-category-input (input (string-ascii 50)))
+  (and (> (len input) u0) (<= (len input) u50))
+)
+
+(define-private (validate-name-input (input (string-ascii 100)))
+  (and (> (len input) u0) (<= (len input) u100))
+)
+
+(define-private (validate-equipment-status (status uint))
+  (or (is-eq status EQUIPMENT-STATUS-AVAILABLE)
+      (is-eq status EQUIPMENT-STATUS-LEASED)
+      (is-eq status EQUIPMENT-STATUS-MAINTENANCE)
+      (is-eq status EQUIPMENT-STATUS-RETIRED))
+)
+
+(define-private (validate-rating (rating uint))
+  (and (>= rating u1) (<= rating u5))
+)
+
 ;; Public functions
 
 (define-public (register-equipment 
@@ -241,27 +266,32 @@
   (token-supply uint))
   (let ((equipment-id (var-get next-equipment-id))
         (current-time (unwrap-panic (get-block-info? time (- block-height u1)))))
-    (if (and (> daily-rate u0) (> token-supply u0))
-      (begin
-        (map-set equipment-registry
-          { equipment-id: equipment-id }
-          {
-            owner: tx-sender,
-            name: name,
-            description: description,
-            category: category,
-            daily-rate: daily-rate,
-            deposit-required: deposit-required,
-            status: EQUIPMENT-STATUS-AVAILABLE,
-            created-at: current-time,
-            total-earnings: u0,
-            maintenance-cost: u0
-          })
-        (unwrap! (mint-equipment-tokens equipment-id tx-sender token-supply) ERR-INVALID-AMOUNT)
-        (var-set next-equipment-id (+ equipment-id u1))
-        (ok equipment-id)
-      )
-      ERR-INVALID-AMOUNT
+    ;; Input validation
+    (asserts! (validate-name-input name) ERR-INVALID-INPUT)
+    (asserts! (validate-string-input description) ERR-INVALID-INPUT)
+    (asserts! (validate-category-input category) ERR-INVALID-INPUT)
+    (asserts! (> daily-rate u0) ERR-INVALID-AMOUNT)
+    (asserts! (>= deposit-required u0) ERR-INVALID-INPUT)
+    (asserts! (> token-supply u0) ERR-INVALID-AMOUNT)
+    
+    (begin
+      (map-set equipment-registry
+        { equipment-id: equipment-id }
+        {
+          owner: tx-sender,
+          name: name,
+          description: description,
+          category: category,
+          daily-rate: daily-rate,
+          deposit-required: deposit-required,
+          status: EQUIPMENT-STATUS-AVAILABLE,
+          created-at: current-time,
+          total-earnings: u0,
+          maintenance-cost: u0
+        })
+      (unwrap! (mint-equipment-tokens equipment-id tx-sender token-supply) ERR-INVALID-AMOUNT)
+      (var-set next-equipment-id (+ equipment-id u1))
+      (ok equipment-id)
     )
   )
 )
@@ -278,49 +308,42 @@
     (required-deposit (get deposit-required equipment-data))
     (total-required (+ total-cost required-deposit))
   )
-    (if (and 
-      (is-eq (get status equipment-data) EQUIPMENT-STATUS-AVAILABLE)
-      (<= duration (var-get max-lease-duration))
-      (> duration u0)
-      (>= (get-user-balance tx-sender) total-required))
-      (begin
-        ;; Transfer funds for lease
-        (unwrap! (transfer-funds tx-sender (get owner equipment-data) total-cost) ERR-INSUFFICIENT-BALANCE)
-        ;; Hold deposit
-        (unwrap! (transfer-funds tx-sender (as-contract tx-sender) required-deposit) ERR-INSUFFICIENT-BALANCE)
-        
-        ;; Update equipment status
-        (map-set equipment-registry
-          { equipment-id: equipment-id }
-          (merge equipment-data { status: EQUIPMENT-STATUS-LEASED }))
-        
-        ;; Create lease agreement
-        (map-set lease-agreements
-          { lease-id: lease-id }
-          {
-            equipment-id: equipment-id,
-            lessee: tx-sender,
-            lessor: (get owner equipment-data),
-            start-time: current-time,
-            end-time: end-time,
-            daily-rate: (get daily-rate equipment-data),
-            total-amount: total-cost,
-            deposit-paid: required-deposit,
-            status: LEASE-STATUS-ACTIVE,
-            payments-made: total-cost,
-            last-payment-time: current-time
-          })
-        
-        (var-set next-lease-id (+ lease-id u1))
-        (ok lease-id)
-      )
-      (if (not (is-eq (get status equipment-data) EQUIPMENT-STATUS-AVAILABLE))
-        ERR-EQUIPMENT-NOT-AVAILABLE
-        (if (> duration (var-get max-lease-duration))
-          ERR-INVALID-DURATION
-          ERR-INSUFFICIENT-BALANCE
-        )
-      )
+    ;; Input validation
+    (asserts! (is-eq (get status equipment-data) EQUIPMENT-STATUS-AVAILABLE) ERR-EQUIPMENT-NOT-AVAILABLE)
+    (asserts! (<= duration (var-get max-lease-duration)) ERR-INVALID-DURATION)
+    (asserts! (> duration u0) ERR-INVALID-DURATION)
+    (asserts! (>= (get-user-balance tx-sender) total-required) ERR-INSUFFICIENT-BALANCE)
+    
+    (begin
+      ;; Transfer funds for lease
+      (unwrap! (transfer-funds tx-sender (get owner equipment-data) total-cost) ERR-INSUFFICIENT-BALANCE)
+      ;; Hold deposit
+      (unwrap! (transfer-funds tx-sender (as-contract tx-sender) required-deposit) ERR-INSUFFICIENT-BALANCE)
+      
+      ;; Update equipment status
+      (map-set equipment-registry
+        { equipment-id: equipment-id }
+        (merge equipment-data { status: EQUIPMENT-STATUS-LEASED }))
+      
+      ;; Create lease agreement
+      (map-set lease-agreements
+        { lease-id: lease-id }
+        {
+          equipment-id: equipment-id,
+          lessee: tx-sender,
+          lessor: (get owner equipment-data),
+          start-time: current-time,
+          end-time: end-time,
+          daily-rate: (get daily-rate equipment-data),
+          total-amount: total-cost,
+          deposit-paid: required-deposit,
+          status: LEASE-STATUS-ACTIVE,
+          payments-made: total-cost,
+          last-payment-time: current-time
+        })
+      
+      (var-set next-lease-id (+ lease-id u1))
+      (ok lease-id)
     )
   )
 )
@@ -331,29 +354,27 @@
     (equipment-data (unwrap! (get-equipment-info (get equipment-id lease-data)) ERR-NOT-FOUND))
     (current-time (unwrap-panic (get-block-info? time (- block-height u1))))
   )
-    (if (and 
-      (is-eq (get lessee lease-data) tx-sender)
-      (is-eq (get status lease-data) LEASE-STATUS-ACTIVE))
-      (begin
-        ;; Return deposit to lessee
-        (unwrap! (transfer-funds (as-contract tx-sender) tx-sender (get deposit-paid lease-data)) ERR-INSUFFICIENT-BALANCE)
-        
-        ;; Update lease status
-        (map-set lease-agreements
-          { lease-id: lease-id }
-          (merge lease-data { status: LEASE-STATUS-COMPLETED }))
-        
-        ;; Update equipment status back to available
-        (map-set equipment-registry
-          { equipment-id: (get equipment-id lease-data) }
-          (merge equipment-data { 
-            status: EQUIPMENT-STATUS-AVAILABLE,
-            total-earnings: (+ (get total-earnings equipment-data) (get total-amount lease-data))
-          }))
-        
-        (ok true)
-      )
-      ERR-UNAUTHORIZED
+    (asserts! (is-eq (get lessee lease-data) tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (is-eq (get status lease-data) LEASE-STATUS-ACTIVE) ERR-INVALID-EQUIPMENT-STATE)
+    
+    (begin
+      ;; Return deposit to lessee
+      (unwrap! (transfer-funds (as-contract tx-sender) tx-sender (get deposit-paid lease-data)) ERR-INSUFFICIENT-BALANCE)
+      
+      ;; Update lease status
+      (map-set lease-agreements
+        { lease-id: lease-id }
+        (merge lease-data { status: LEASE-STATUS-COMPLETED }))
+      
+      ;; Update equipment status back to available
+      (map-set equipment-registry
+        { equipment-id: (get equipment-id lease-data) }
+        (merge equipment-data { 
+          status: EQUIPMENT-STATUS-AVAILABLE,
+          total-earnings: (+ (get total-earnings equipment-data) (get total-amount lease-data))
+        }))
+      
+      (ok true)
     )
   )
 )
@@ -363,30 +384,29 @@
     (lease-data (unwrap! (get-lease-info lease-id) ERR-NOT-FOUND))
     (equipment-data (unwrap! (get-equipment-info (get equipment-id lease-data)) ERR-NOT-FOUND))
   )
-    (if (or 
+    (asserts! (or 
       (is-eq (get lessee lease-data) tx-sender)
       (is-eq (get lessor lease-data) tx-sender)
-      (is-authorized tx-sender))
-      (begin
-        ;; Calculate penalty (keep portion of deposit)
-        (let ((penalty (/ (get deposit-paid lease-data) u2))) ;; 50% penalty
-          (unwrap! (transfer-funds (as-contract tx-sender) (get lessor lease-data) penalty) ERR-INSUFFICIENT-BALANCE)
-          (unwrap! (transfer-funds (as-contract tx-sender) (get lessee lease-data) (- (get deposit-paid lease-data) penalty)) ERR-INSUFFICIENT-BALANCE)
-        )
-        
-        ;; Update lease status
-        (map-set lease-agreements
-          { lease-id: lease-id }
-          (merge lease-data { status: LEASE-STATUS-TERMINATED }))
-        
-        ;; Update equipment status back to available
-        (map-set equipment-registry
-          { equipment-id: (get equipment-id lease-data) }
-          (merge equipment-data { status: EQUIPMENT-STATUS-AVAILABLE }))
-        
-        (ok true)
+      (is-authorized tx-sender)) ERR-UNAUTHORIZED)
+    
+    (begin
+      ;; Calculate penalty (keep portion of deposit)
+      (let ((penalty (/ (get deposit-paid lease-data) u2))) ;; 50% penalty
+        (unwrap! (transfer-funds (as-contract tx-sender) (get lessor lease-data) penalty) ERR-INSUFFICIENT-BALANCE)
+        (unwrap! (transfer-funds (as-contract tx-sender) (get lessee lease-data) (- (get deposit-paid lease-data) penalty)) ERR-INSUFFICIENT-BALANCE)
       )
-      ERR-UNAUTHORIZED
+      
+      ;; Update lease status
+      (map-set lease-agreements
+        { lease-id: lease-id }
+        (merge lease-data { status: LEASE-STATUS-TERMINATED }))
+      
+      ;; Update equipment status back to available
+      (map-set equipment-registry
+        { equipment-id: (get equipment-id lease-data) }
+        (merge equipment-data { status: EQUIPMENT-STATUS-AVAILABLE }))
+      
+      (ok true)
     )
   )
 )
@@ -396,13 +416,17 @@
   (recipient principal)
   (amount uint))
   (let ((sender-balance (get-equipment-token-balance equipment-id tx-sender)))
-    (if (and (>= sender-balance amount) (> amount u0))
-      (begin
-        (unwrap! (burn-equipment-tokens equipment-id tx-sender amount) ERR-INSUFFICIENT-BALANCE)
-        (unwrap! (mint-equipment-tokens equipment-id recipient amount) ERR-INVALID-AMOUNT)
-        (ok true)
-      )
-      ERR-INSUFFICIENT-BALANCE
+    ;; Input validation
+    (asserts! (is-some (get-equipment-info equipment-id)) ERR-NOT-FOUND)
+    (asserts! (>= sender-balance amount) ERR-INSUFFICIENT-BALANCE)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    ;; Validate recipient is not the zero principal
+    (asserts! (not (is-eq recipient 'SP000000000000000000002Q6VF78)) ERR-INVALID-INPUT)
+    
+    (begin
+      (unwrap! (burn-equipment-tokens equipment-id tx-sender amount) ERR-INSUFFICIENT-BALANCE)
+      (unwrap! (mint-equipment-tokens equipment-id recipient amount) ERR-INVALID-AMOUNT)
+      (ok true)
     )
   )
 )
@@ -414,115 +438,110 @@
       { total-rating: u0, rating-count: u0, average-rating: u0 }
       (get-equipment-rating equipment-id)))
   )
-    (if (and (>= rating u1) (<= rating u5))
-      (let (
-        (new-total (+ (get total-rating current-rating) rating))
-        (new-count (+ (get rating-count current-rating) u1))
-        (new-average (/ new-total new-count))
-      )
-        (map-set equipment-ratings
-          { equipment-id: equipment-id }
-          {
-            total-rating: new-total,
-            rating-count: new-count,
-            average-rating: new-average
-          })
-        (ok true)
-      )
-      ERR-INVALID-AMOUNT
+    ;; Input validation
+    (asserts! (validate-rating rating) ERR-INVALID-AMOUNT)
+    ;; Additional validation to ensure equipment-id is valid
+    (asserts! (> equipment-id u0) ERR-INVALID-INPUT)
+    
+    (let (
+      (validated-total (+ (get total-rating current-rating) rating))
+      (validated-count (+ (get rating-count current-rating) u1))
+      (validated-average (/ validated-total validated-count))
+    )
+      (map-set equipment-ratings
+        { equipment-id: equipment-id }
+        {
+          total-rating: validated-total,
+          rating-count: validated-count,
+          average-rating: validated-average
+        })
+      (ok true)
     )
   )
 )
 
 (define-public (deposit-funds (amount uint))
-  (if (> amount u0)
-    (begin
-      (unwrap! (stx-transfer? amount tx-sender (as-contract tx-sender)) ERR-INSUFFICIENT-BALANCE)
-      (map-set user-balances 
-        { user: tx-sender } 
-        { balance: (+ (get-user-balance tx-sender) amount) })
-      (ok true)
-    )
-    ERR-INVALID-AMOUNT
+  (begin
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (match (stx-transfer? amount tx-sender (as-contract tx-sender))
+      success (begin
+        (map-set user-balances 
+          { user: tx-sender } 
+          { balance: (+ (get-user-balance tx-sender) amount) })
+        (ok true))
+      error ERR-INSUFFICIENT-BALANCE)
   )
 )
 
 (define-public (withdraw-funds (amount uint))
-  (let ((user-balance (get-user-balance tx-sender)))
-    (if (and (> amount u0) (>= user-balance amount))
-      (begin
-        (unwrap! (as-contract (stx-transfer? amount tx-sender tx-sender)) ERR-INSUFFICIENT-BALANCE)
+  (let ((user-balance (get-user-balance tx-sender))
+        (caller tx-sender))
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (>= user-balance amount) ERR-INSUFFICIENT-BALANCE)
+    
+    (match (as-contract (stx-transfer? amount tx-sender caller))
+      success (begin
         (map-set user-balances 
-          { user: tx-sender } 
+          { user: caller } 
           { balance: (- user-balance amount) })
-        (ok true)
-      )
-      ERR-INSUFFICIENT-BALANCE
-    )
+        (ok true))
+      error ERR-INSUFFICIENT-BALANCE)
   )
 )
 
 (define-public (update-equipment-status (equipment-id uint) (new-status uint))
   (let ((equipment-data (unwrap! (get-equipment-info equipment-id) ERR-NOT-FOUND)))
-    (if (is-eq (get owner equipment-data) tx-sender)
-      (begin
-        (map-set equipment-registry
-          { equipment-id: equipment-id }
-          (merge equipment-data { status: new-status }))
-        (ok true)
-      )
-      ERR-UNAUTHORIZED
+    (asserts! (is-eq (get owner equipment-data) tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (validate-equipment-status new-status) ERR-INVALID-INPUT)
+    
+    (begin
+      (map-set equipment-registry
+        { equipment-id: equipment-id }
+        (merge equipment-data { status: new-status }))
+      (ok true)
     )
   )
 )
 
 (define-public (add-authorized-operator (operator principal))
-  (if (is-eq tx-sender CONTRACT-OWNER)
-    (begin
-      (map-set authorized-operators 
-        { operator: operator } 
-        { authorized: true })
-      (ok true)
-    )
-    ERR-UNAUTHORIZED
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    ;; Validate operator is not the zero principal
+    (asserts! (not (is-eq operator 'SP000000000000000000002Q6VF78)) ERR-INVALID-INPUT)
+    (map-set authorized-operators 
+      { operator: operator } 
+      { authorized: true })
+    (ok true)
   )
 )
 
 (define-public (remove-authorized-operator (operator principal))
-  (if (is-eq tx-sender CONTRACT-OWNER)
-    (begin
-      (map-set authorized-operators 
-        { operator: operator } 
-        { authorized: false })
-      (ok true)
-    )
-    ERR-UNAUTHORIZED
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    ;; Validate operator is not the zero principal
+    (asserts! (not (is-eq operator 'SP000000000000000000002Q6VF78)) ERR-INVALID-INPUT)
+    (map-set authorized-operators 
+      { operator: operator } 
+      { authorized: false })
+    (ok true)
   )
 )
 
 (define-public (update-platform-fee-rate (new-rate uint))
-  (if (is-eq tx-sender CONTRACT-OWNER)
-    (if (<= new-rate u1000) ;; Max 10%
-      (begin
-        (var-set platform-fee-rate new-rate)
-        (ok true)
-      )
-      ERR-INVALID-AMOUNT
-    )
-    ERR-UNAUTHORIZED
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (<= new-rate u1000) ERR-INVALID-AMOUNT)
+    (var-set platform-fee-rate new-rate)
+    (ok true)
   )
 )
 
 (define-public (emergency-pause-equipment (equipment-id uint))
   (let ((equipment-data (unwrap! (get-equipment-info equipment-id) ERR-NOT-FOUND)))
-    (if (or (is-eq (get owner equipment-data) tx-sender) (is-authorized tx-sender))
-      (begin
-        (map-set equipment-registry
-          { equipment-id: equipment-id }
-          (merge equipment-data { status: EQUIPMENT-STATUS-MAINTENANCE }))
-        (ok true)
-      )
-      ERR-UNAUTHORIZED
-    )
+    (asserts! (or (is-eq (get owner equipment-data) tx-sender) (is-authorized tx-sender)) ERR-UNAUTHORIZED)
+    (map-set equipment-registry
+      { equipment-id: equipment-id }
+      (merge equipment-data { status: EQUIPMENT-STATUS-MAINTENANCE }))
+    (ok true)
   )
 )
